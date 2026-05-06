@@ -78,10 +78,10 @@ Pile numbers are 1-based: `T1`–`T7` for tableau, `F1`–`F4` for foundations.
 ## Card Encoding
 
 Each card is stored as a single 16-bit word:
-Bits 5-4 = suit   (00=Clubs  01=Diamonds  10=Hearts  11=Spades)
-Bits 3-0 = rank   (0=Ace  1=Two  ...  12=King)
-Bit    7 = face-down flag (set = face-down, cleared when revealed)
-x00FF    = empty slot sentinel
+-Bits 5-4 = suit   (00=Clubs  01=Diamonds  10=Hearts  11=Spades)
+-Bits 3-0 = rank   (0=Ace  1=Two  ...  12=King)
+-Bit    7 = face-down flag (set = face-down, cleared when revealed)
+-x00FF    = empty slot sentinel
 ---
 
 ## Memory Map
