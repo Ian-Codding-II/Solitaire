@@ -75,7 +75,7 @@ Pile numbers are 1-based: `T1`–`T7` for tableau, `F1`–`F4` for foundations.
 
 ---
 
-## Card Encoding
+### Card Encoding
 
 Each card is stored as a single 16-bit word:
 -Bits 5-4 = suit   (00=Clubs  01=Diamonds  10=Hearts  11=Spades)
