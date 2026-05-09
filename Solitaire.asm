@@ -59,6 +59,7 @@ GA_VMOVE    .FILL VALID_MOVE    ; address of VALID_MOVE
 GA_DOMOVE   .FILL DO_MOVE       ; address of DO_MOVE
 GA_CHKWIN   .FILL CHECK_WIN     ; address of CHECK_WIN
 GA_PWIN     .FILL PRINT_WIN     ; address of PRINT_WIN
+GA_C_NL     .FILL C_NL          ; pointer to newline character (for DO_QUIT flush)
 
 ; ----------------------------------------------------------------
 ;  SHARED VARIABLES
@@ -71,6 +72,7 @@ MSRC        .BLKW 1             ; source pile index (0-based)
 MDST        .BLKW 1             ; destination pile index (0-based)
 MCNT        .BLKW 1             ; number of cards to move (default 1)
 SCRATCH_CRD .BLKW 1             ; temporary card storage for validation
+MTT_RSAVE   .BLKW 1             ; MOVE_TAB_TAB: saves R5 (source row) across JSRR
 
 ; R7 save slots - each subroutine saves its return address here
 MN_R7   .BLKW 1                 ; MENU return address save
@@ -136,13 +138,31 @@ C_STAR      .FILL x2A           ; asterisk '*' for face-down cards
 C_LBR       .FILL x5B           ; left bracket '['
 C_RBR       .FILL x5D           ; right bracket ']'
 
-; UTF-8 encoded suit symbols (3 bytes each, sent via EBYTE)
+; UTF-8 encoded suit symbols (3 bytes each, sent via PUTS as null-terminated strings)
+; Using .FILL for each byte since LC-3 .STRINGZ only handles ASCII
 UTF_B1      .FILL xE2           ; first byte of all suit symbols (E2)
 UTF_B2      .FILL x99           ; second byte of all suit symbols (99)
 SUT_C3      .FILL xA3           ; third byte for Clubs    (♣ = E2 99 A3)
 SUT_D3      .FILL xA6           ; third byte for Diamonds (♦ = E2 99 A6)
 SUT_H3      .FILL xA5           ; third byte for Hearts   (♥ = E2 99 A5)
 SUT_S3      .FILL xA0           ; third byte for Spades   (♠ = E2 99 A0)
+; Pre-built null-terminated suit strings for TRAP x22 (PUTS)
+STR_CLB .FILL xE2   ; ♣ byte 1
+        .FILL x99   ; ♣ byte 2
+        .FILL xA3   ; ♣ byte 3
+        .FILL x00   ; null terminator
+STR_DIA .FILL xE2   ; ♦ byte 1
+        .FILL x99   ; ♦ byte 2
+        .FILL xA6   ; ♦ byte 3
+        .FILL x00   ; null terminator
+STR_HRT .FILL xE2   ; ♥ byte 1
+        .FILL x99   ; ♥ byte 2
+        .FILL xA5   ; ♥ byte 3
+        .FILL x00   ; null terminator
+STR_SPA .FILL xE2   ; ♠ byte 1
+        .FILL x99   ; ♠ byte 2
+        .FILL xA0   ; ♠ byte 3
+        .FILL x00   ; null terminator
 
 ; Numeric constants that exceed the 5-bit immediate range (-16 to +15)
 NEG_52      .FILL #-52          ; negative 52 (deck size)
@@ -161,6 +181,7 @@ A_WASTE     .FILL x3969         ; address of WASTE_TOP variable
 A_TABDAT    .FILL x396A         ; base address of TAB_DATA (7 piles x 20 slots)
 A_TABSZ     .FILL x39F6         ; base address of TAB_SZ array (7 words)
 A_FNDTOP    .FILL x3A38         ; base address of FOUND_TOP array (4 words)
+A_FNDSUT    .FILL FOUND_SUIT     ; base address of FOUND_SUIT array (4 words, -1=empty)
 
 ; Input buffer and rank character lookup table
 INBUF       .BLKW 20            ; 20-char input buffer for user commands
@@ -197,11 +218,13 @@ GAME_LOOP
         BRz DO_QUIT             ; if zero, MTYPE==6, user typed Q
         LD  R5, GA_VMOVE        ; load address of VALID_MOVE
         JSRR R5                 ; check if move is legal -> R0=1/0
+        ADD R0, R0, #0          ; set condition codes from R0
         BRz BAD_MOVE            ; if R0=0, move is illegal
         LD  R5, GA_DOMOVE       ; load address of DO_MOVE
         JSRR R5                 ; execute the move, update game state
         LD  R5, GA_CHKWIN       ; load address of CHECK_WIN
         JSRR R5                 ; check if all foundations complete -> R0=1/0
+        ADD R0, R0, #0          ; set condition codes from R0
         BRz GAME_LOOP           ; if R0=0, game not won yet, keep playing
         LD  R5, GA_PWIN         ; load address of PRINT_WIN
         JSRR R5                 ; print victory message
@@ -213,8 +236,12 @@ BAD_MOVE
         BRnzp GAME_LOOP         ; unconditional branch back to game loop
 
 DO_QUIT
+        LD  R0, GA_C_NL         ; R0 = address of newline constant
+        LDR R0, R0, #0          ; R0 = newline char
+        TRAP x21                ; OUT: newline (flushes any pending output)
         LEA R0, STR_BYE         ; R0 = address of "Goodbye" string
         TRAP x22                ; PUTS: print it
+        TRAP x21                ; one more flush
         HALT                    ; stop the simulator
 
 STR_BAD .STRINGZ "Invalid move.\n"   ; printed when move is rejected
@@ -280,7 +307,7 @@ MN_S5   .STRINGZ "COMMANDS:\n"
 MN_S6   .STRINGZ "  D        Draw from stock to waste\n"
 MN_S7   .STRINGZ "  R        Reset waste back to stock\n"
 MN_S8   .STRINGZ "  Tn Fm    Tableau n -> Foundation m\n"
-MN_S9   .STRINGZ "  Tn Tm k  Move k cards from tab n to m    Q=Quit\n\nENTER to start...\n"
+MN_S9   .STRINGZ "  Tn Tm k  Move k cards from tab n to m\n  W Tn     Waste -> Tableau n\n  W Fn     Waste -> Foundation n    Q=Quit\n\nENTER to start...\n"
 
 ; Local pointer table for GET_SEED
 PGS_R7      .FILL GS_R7         ; pointer to GET_SEED's R7 save slot
@@ -520,6 +547,7 @@ SH_LP   LD  R5, RNG_LRAND       ; R5 = address of LCG_RAND
 PDL_R7      .FILL DL_R7         ; pointer to DEAL R7 save slot
 PDL_TABSZ   .FILL A_TABSZ       ; pointer to TAB_SZ base address
 PDL_FNDTOP  .FILL A_FNDTOP      ; pointer to FOUND_TOP base address
+PDL_FNDSUT  .FILL A_FNDSUT      ; pointer to FOUND_SUIT base address
 PDL_WASTE   .FILL A_WASTE       ; pointer to WASTE_TOP address
 PDL_EMPTY   .FILL C_EMPTY       ; pointer to empty sentinel (xFF)
 PDL_DECK    .FILL A_DECK        ; pointer to DECK base address
@@ -564,6 +592,18 @@ DL_CFT  STR R1, R0, #0          ; FOUND_TOP[foundation] = -1
         ADD R0, R0, #1          ; advance to next FOUND_TOP slot
         ADD R2, R2, #-1         ; decrement counter
         BRp DL_CFT              ; repeat for all 4 foundations
+
+        ; Initialise FOUND_SUIT[0..3] = -1 (no suit assigned yet)
+        LD  R5, PDL_FNDSUT      ; R5 = address of A_FNDSUT pointer
+        LDR R0, R5, #0          ; R0 = base address of FOUND_SUIT array
+        AND R1, R1, #0          ; R1 = 0
+        ADD R1, R1, #-1         ; R1 = -1 (no suit assigned)
+        AND R2, R2, #0          ; R2 = 0
+        ADD R2, R2, #4          ; R2 = 4
+DL_CST  STR R1, R0, #0          ; FOUND_SUIT[foundation] = -1
+        ADD R0, R0, #1          ; advance
+        ADD R2, R2, #-1         ; decrement
+        BRp DL_CST              ; repeat for all 4
 
         ; Set WASTE_TOP = C_EMPTY (no waste card yet)
         LD  R5, PDL_WASTE       ; R5 = address of A_WASTE pointer
@@ -860,13 +900,10 @@ PPC_MRNK    .FILL MASK_RNK      ; pointer to rank mask (x000F)
 PPC_MSUT    .FILL MASK_SUT      ; pointer to suit mask (x0030)
 PPC_RANKCH  .FILL RANK_CH       ; address of rank character table
 PPC_NEG32   .FILL NEG_32        ; pointer to -32 (for Hearts suit detection)
-PPC_EBYTE   .FILL EBYTE         ; address of EBYTE subroutine
-PPC_UB1     .FILL UTF_B1        ; pointer to UTF-8 byte 1 (xE2)
-PPC_UB2     .FILL UTF_B2        ; pointer to UTF-8 byte 2 (x99)
-PPC_SC3     .FILL SUT_C3        ; pointer to Clubs third byte  (xA3)
-PPC_SD3     .FILL SUT_D3        ; pointer to Diamonds third byte (xA6)
-PPC_SH3     .FILL SUT_H3        ; pointer to Hearts third byte  (xA5)
-PPC_SS3     .FILL SUT_S3        ; pointer to Spades third byte  (xA0)
+PPC_SCLB    .FILL STR_CLB       ; address of pre-built Clubs string (♣)
+PPC_SDIA    .FILL STR_DIA       ; address of pre-built Diamonds string (♦)
+PPC_SHRT    .FILL STR_HRT       ; address of pre-built Hearts string (♥)
+PPC_SSPA    .FILL STR_SPA       ; address of pre-built Spades string (♠)
 
 ; ----------------------------------------------------------------
 ;  PRINT_CARD - Print one card as [RS] where R=rank S=suit symbol
@@ -917,60 +954,20 @@ PRINT_CARD
         BRz DPC_HRT             ; if 0, Hearts
         BRnzp DPC_SPA           ; otherwise Spades
 
-DPC_CLB LD  R0, PPC_UB1         ; ♣ Clubs: UTF-8 = E2 99 A3
-        LDR R0, R0, #0          ; R0 = xE2 (first byte)
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte E2
-        LD  R0, PPC_UB2         ; R0 = address of second byte
-        LDR R0, R0, #0          ; R0 = x99
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte 99
-        LD  R0, PPC_SC3         ; R0 = address of Clubs third byte
-        LDR R0, R0, #0          ; R0 = xA3
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte A3 -> ♣ complete
+DPC_CLB LD  R0, PPC_SCLB        ; ♣ Clubs: load address of pre-built string
+        TRAP x22                ; PUTS: emit E2 99 A3 (♣) atomically
         BRnzp DPC_END           ; done with suit
 
-DPC_DIA LD  R0, PPC_UB1         ; ♦ Diamonds: UTF-8 = E2 99 A6
-        LDR R0, R0, #0          ; R0 = xE2
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte E2
-        LD  R0, PPC_UB2         ; R0 = address of second byte
-        LDR R0, R0, #0          ; R0 = x99
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte 99
-        LD  R0, PPC_SD3         ; R0 = address of Diamonds third byte
-        LDR R0, R0, #0          ; R0 = xA6
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte A6 -> ♦ complete
+DPC_DIA LD  R0, PPC_SDIA        ; ♦ Diamonds: load address of pre-built string
+        TRAP x22                ; PUTS: emit E2 99 A6 (♦) atomically
         BRnzp DPC_END           ; done with suit
 
-DPC_HRT LD  R0, PPC_UB1         ; ♥ Hearts: UTF-8 = E2 99 A5
-        LDR R0, R0, #0          ; R0 = xE2
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte E2
-        LD  R0, PPC_UB2         ; R0 = address of second byte
-        LDR R0, R0, #0          ; R0 = x99
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte 99
-        LD  R0, PPC_SH3         ; R0 = address of Hearts third byte
-        LDR R0, R0, #0          ; R0 = xA5
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte A5 -> ♥ complete
+DPC_HRT LD  R0, PPC_SHRT        ; ♥ Hearts: load address of pre-built string
+        TRAP x22                ; PUTS: emit E2 99 A5 (♥) atomically
         BRnzp DPC_END           ; done with suit
 
-DPC_SPA LD  R0, PPC_UB1         ; ♠ Spades: UTF-8 = E2 99 A0
-        LDR R0, R0, #0          ; R0 = xE2
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte E2
-        LD  R0, PPC_UB2         ; R0 = address of second byte
-        LDR R0, R0, #0          ; R0 = x99
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte 99
-        LD  R0, PPC_SS3         ; R0 = address of Spades third byte
-        LDR R0, R0, #0          ; R0 = xA0
-        LD  R5, PPC_EBYTE       ; R5 = address of EBYTE
-        JSRR R5                 ; emit byte A0 -> ♠ complete
+DPC_SPA LD  R0, PPC_SSPA        ; ♠ Spades: load address of pre-built string
+        TRAP x22                ; PUTS: emit E2 99 A0 (♠) atomically
         BRnzp DPC_END           ; done with suit
 
 DPC_EMP LD  R0, PPC_SPACE       ; empty card: print two spaces
@@ -1259,8 +1256,9 @@ PVM_MDST    .FILL MDST          ; pointer to MDST
 PVM_MCNT    .FILL MCNT          ; pointer to MCNT
 PVM_TABSZ   .FILL A_TABSZ       ; pointer to TAB_SZ base address
 PVM_FNDTOP  .FILL A_FNDTOP      ; pointer to FOUND_TOP base address
-PVM_MRNK    .FILL MASK_RNK      ; pointer to rank mask
+PVM_FNDSUT  .FILL A_FNDSUT      ; pointer to FOUND_SUIT base address
 PVM_MSUT    .FILL MASK_SUT      ; pointer to suit mask
+PVM_MRNK    .FILL MASK_RNK      ; pointer to rank mask
 PVM_TABADDR .FILL TABADDR       ; address of TABADDR helper
 PVM_SCOLOR  .FILL SUIT_COLOR    ; address of SUIT_COLOR helper
 PVM_TABDAT  .FILL A_TABDAT      ; pointer to TAB_DATA base address
@@ -1323,13 +1321,9 @@ VVM_NR  ; Check TAB->FOUND: top of src pile must fit on foundation
         BRnp VVM_NTF            ; not tab->found, try next
         LD  R5, PVM_TABTOP      ; R5 = address of VM_TAB_TOP
         JSRR R5                 ; R0 = top face-up card of MSRC (-1 if empty)
-        ADD R2, R0, #0          ; R2 = card value
-        BRn VVM_RET             ; if -1, pile empty -> invalid (R0 already 0...)
-        ; Note: after JSRR, R0 has card or -1. If -1, R0 is negative.
-        ; need R0=0 for invalid. But JSRR returned -1 in R0
-        AND R0, R0, #0          ; reset R0=0 before calling CHK_FND
-        ADD R2, R2, #0          ; set CC from R2
-        BRn VVM_RET             ; pile empty (R2=-1), return R0=0
+        ADD R2, R0, #0          ; R2 = card; CC set from card value
+        BRn VVM_RET_Z           ; if -1, pile empty -> return R0=0
+        AND R0, R0, #0          ; R0 = 0 (reset for return value)
         LD  R5, PVM_CHKFND      ; R5 = address of VM_CHK_FND
         JSRR R5                 ; R0 = 1 if card R2 fits on MDST foundation
         BRnzp VVM_RET           ; return result
@@ -1367,9 +1361,8 @@ VVM_NTT ; Check WASTE->TAB: waste card must fit on destination pile
         LDR R3, R5, #0          ; R3 = xFF
         NOT R3, R3
         ADD R3, R3, #1          ; R3 = -xFF
-        ADD R3, R2, R3          ; R3 = waste - xFF
-        AND R0, R0, #0          ; R0 = 0
-        BRz VVM_RET             ; waste is empty -> invalid
+        ADD R3, R2, R3          ; R3 = waste - xFF; CC set here
+        BRz VVM_RET_Z           ; waste is empty -> return R0=0
         LD  R5, PVM_SCRATCH     ; R5 = address of SCRATCH_CRD
         STR R2, R5, #0          ; SCRATCH_CRD = waste card
         LD  R5, PVM_CHKTAB      ; R5 = address of VM_CHK_TAB
@@ -1384,11 +1377,14 @@ VVM_NWT ; WASTE->FOUND: waste card must fit on destination foundation
         LDR R3, R5, #0          ; R3 = xFF
         NOT R3, R3
         ADD R3, R3, #1          ; R3 = -xFF
-        ADD R3, R2, R3          ; R3 = waste - xFF
-        AND R0, R0, #0          ; R0 = 0
-        BRz VVM_RET             ; waste is empty -> invalid
+        ADD R3, R2, R3          ; R3 = waste - xFF; CC set here
+        BRz VVM_RET_Z           ; if zero, waste is empty -> return R0=0
         LD  R5, PVM_CHKFND      ; R5 = address of VM_CHK_FND
         JSRR R5                 ; R0 = 1 if waste card fits on MDST foundation
+        BRnzp VVM_RET
+
+VVM_RET_Z
+        AND R0, R0, #0          ; R0 = 0 (invalid: waste empty)
 
 VVM_RET LD  R5, PVM_R7          ; R5 = address of VM_R7 save slot
         LDR R7, R5, #0          ; restore return address
@@ -1477,31 +1473,57 @@ VCF_SLP ADD R3, R3, #-16        ; subtract 16 from suit bits
         ADD R4, R4, #1          ; suit index++
         BRnzp VCF_SLP           ; keep counting
 
-VCF_SD  ; R4 = suit index (0=Clubs, 1=Diamonds, 2=Hearts, 3=Spades)
+VCF_SD  ; R4 = card suit index (0=Clubs, 1=Diamonds, 2=Hearts, 3=Spades)
+        ; Extract card rank into R5
         LD  R5, PVM_MRNK        ; R5 = address of rank mask
         LDR R5, R5, #0          ; R5 = x000F
         AND R5, R2, R5          ; R5 = rank of card (0-12)
 
-        ; Check: suit index must equal MDST (can only place on matching foundation)
+        ; Get FOUND_TOP[MDST] to check if foundation is empty
         LD  R3, PVM_MDST        ; R3 = address of MDST
-        LDR R3, R3, #0          ; R3 = MDST value
-        NOT R3, R3              ; R3 = NOT MDST
-        ADD R3, R3, #1          ; R3 = -MDST
-        ADD R3, R3, R4          ; R3 = suit_index - MDST
-        BRnp VCF_NO             ; if nonzero, suit doesn't match foundation
+        LDR R3, R3, #0          ; R3 = foundation index (0-3)
+        LD  R2, PVM_FNDTOP      ; R2 = address of A_FNDTOP pointer
+        LDR R2, R2, #0          ; R2 = base of FOUND_TOP
+        ADD R2, R2, R3          ; R2 = address of FOUND_TOP[MDST]
+        LDR R2, R2, #0          ; R2 = FOUND_TOP[MDST] (-1 if empty)
 
-        ; Check: rank must be exactly FOUND_TOP[suit]+1
-        LD  R3, PVM_FNDTOP      ; R3 = address of A_FNDTOP pointer
-        LDR R3, R3, #0          ; R3 = base of FOUND_TOP
-        ADD R3, R3, R4          ; R3 = address of FOUND_TOP[suit]
-        LDR R3, R3, #0          ; R3 = current top rank (-1 if empty)
-        ADD R3, R3, #1          ; R3 = expected next rank (0 for Ace on empty)
-        NOT R5, R5              ; R5 = NOT card_rank
+        ADD R2, R2, #0          ; set CC from FOUND_TOP
+        BRn VCF_EMPTY           ; if -1, foundation is empty -> check for Ace
+
+        ; Foundation not empty: card suit must match FOUND_SUIT[MDST]
+        LD  R3, PVM_MDST        ; R3 = address of MDST
+        LDR R3, R3, #0          ; R3 = foundation index
+        LD  R0, PVM_FNDSUT      ; R0 = address of A_FNDSUT pointer
+        LDR R0, R0, #0          ; R0 = base of FOUND_SUIT
+        ADD R0, R0, R3          ; R0 = address of FOUND_SUIT[MDST]
+        LDR R0, R0, #0          ; R0 = suit index recorded for this foundation
+        NOT R0, R0              ; R0 = NOT suit
+        ADD R0, R0, #1          ; R0 = -suit
+        ADD R0, R4, R0          ; R0 = card_suit - foundation_suit
+        BRnp VCF_NO             ; suit mismatch -> invalid
+
+        ; Check rank: card rank must be FOUND_TOP[MDST] + 1
+        ; R2 was FOUND_TOP[MDST] before we clobbered R2 above - reload
+        LD  R3, PVM_MDST
+        LDR R3, R3, #0
+        LD  R0, PVM_FNDTOP
+        LDR R0, R0, #0
+        ADD R0, R0, R3
+        LDR R2, R0, #0          ; R2 = FOUND_TOP[MDST]
+        ADD R2, R2, #1          ; R2 = expected rank
+        NOT R5, R5
         ADD R5, R5, #1          ; R5 = -card_rank
-        ADD R3, R3, R5          ; R3 = expected_rank - card_rank
-        BRnp VCF_NO             ; if nonzero, rank doesn't match -> invalid
+        ADD R2, R2, R5          ; R2 = expected - card_rank
+        BRnp VCF_NO             ; rank mismatch -> invalid
+        BRnzp VCF_YES
 
-        AND R0, R0, #0          ; R0 = 0
+VCF_EMPTY
+        ; Foundation is empty: only an Ace (rank 0) is accepted
+        ADD R5, R5, #0          ; set CC from card rank
+        BRnp VCF_NO             ; if rank != 0, not an Ace -> invalid
+        ; Ace on empty foundation: valid regardless of suit
+
+VCF_YES AND R0, R0, #0          ; R0 = 0
         ADD R0, R0, #1          ; R0 = 1 (valid)
         BRnzp VCF_RET
 
@@ -1509,6 +1531,16 @@ VCF_NO  AND R0, R0, #0          ; R0 = 0 (invalid)
 VCF_RET LD  R5, PVM_VF_R7       ; R5 = address of VF_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET
+
+; Local pointer table for VM_CHK_TAB (PVM_ table is out of +-256 range from here)
+VCT_VC_R7   .FILL VC_R7         ; local: VC_R7 save slot
+VCT_MDST    .FILL MDST          ; local: MDST
+VCT_TABSZ   .FILL A_TABSZ       ; local: TAB_SZ base address
+VCT_TABADDR .FILL TABADDR       ; local: address of TABADDR
+VCT_SCRATCH .FILL SCRATCH_CRD   ; local: SCRATCH_CRD
+VCT_MRNK    .FILL MASK_RNK      ; local: rank mask
+VCT_MSUT    .FILL MASK_SUT      ; local: suit mask
+VCT_SCOLOR  .FILL SUIT_COLOR    ; local: address of SUIT_COLOR
 
 ; ----------------------------------------------------------------
 ;  VM_CHK_TAB - Check if SCRATCH_CRD can go on tableau pile MDST
@@ -1518,11 +1550,11 @@ VCF_RET LD  R5, PVM_VF_R7       ; R5 = address of VF_R7 save slot
 ;  Out: R0 = 1 if legal, R0 = 0 if not
 ; ----------------------------------------------------------------
 VM_CHK_TAB
-        LD  R5, PVM_VC_R7       ; R5 = address of VC_R7 save slot
+        LD  R5, VCT_VC_R7       ; R5 = address of VC_R7 save slot
         STR R7, R5, #0          ; save return address
-        LD  R5, PVM_MDST        ; R5 = address of MDST
+        LD  R5, VCT_MDST        ; R5 = address of MDST
         LDR R1, R5, #0          ; R1 = destination pile index
-        LD  R5, PVM_TABSZ       ; R5 = address of A_TABSZ pointer
+        LD  R5, VCT_TABSZ       ; R5 = address of A_TABSZ pointer
         LDR R3, R5, #0          ; R3 = base of TAB_SZ
         ADD R3, R3, R1          ; R3 = address of TAB_SZ[dst]
         LDR R3, R3, #0          ; R3 = destination pile size
@@ -1531,14 +1563,14 @@ VM_CHK_TAB
 
         ; Get destination top card
         ADD R2, R3, #0          ; R2 = top row index
-        LD  R5, PVM_TABADDR     ; R5 = address of TABADDR
+        LD  R5, VCT_TABADDR     ; R5 = address of TABADDR
         JSRR R5                 ; R0 = address of dst top card
         LDR R3, R0, #0          ; R3 = dst top card value
 
         ; Check rank: src_rank + 1 must equal dst_rank
-        LD  R5, PVM_SCRATCH     ; R5 = address of SCRATCH_CRD
+        LD  R5, VCT_SCRATCH     ; R5 = address of SCRATCH_CRD
         LDR R4, R5, #0          ; R4 = src card
-        LD  R5, PVM_MRNK        ; R5 = address of rank mask
+        LD  R5, VCT_MRNK        ; R5 = address of rank mask
         LDR R5, R5, #0          ; R5 = x000F
         AND R0, R4, R5          ; R0 = src rank
         AND R1, R3, R5          ; R1 = dst rank
@@ -1549,20 +1581,19 @@ VM_CHK_TAB
         BRnp VCT_NO             ; if nonzero, ranks don't fit
 
         ; Check color: src and dst must be opposite colors
-        ; Clubs(0)=black, Diamonds(16)=red, Hearts(32)=red, Spades(48)=black
-        LD  R5, PVM_MSUT        ; R5 = address of suit mask
+        LD  R5, VCT_MSUT        ; R5 = address of suit mask
         LDR R5, R5, #0          ; R5 = x0030
         AND R4, R4, R5          ; R4 = src suit bits
         ADD R1, R4, #0          ; R1 = src suit bits (argument for SUIT_COLOR)
-        LD  R5, PVM_SCOLOR      ; R5 = address of SUIT_COLOR
+        LD  R5, VCT_SCOLOR      ; R5 = address of SUIT_COLOR
         JSRR R5                 ; R0 = 0 if black, 1 if red
         ADD R4, R0, #0          ; R4 = src color
 
-        LD  R5, PVM_MSUT        ; R5 = address of suit mask
+        LD  R5, VCT_MSUT        ; R5 = address of suit mask
         LDR R5, R5, #0          ; R5 = x0030
         AND R5, R3, R5          ; R5 = dst suit bits
         ADD R1, R5, #0          ; R1 = dst suit bits
-        LD  R5, PVM_SCOLOR      ; R5 = address of SUIT_COLOR
+        LD  R5, VCT_SCOLOR      ; R5 = address of SUIT_COLOR
         JSRR R5                 ; R0 = dst color
         NOT R5, R0              ; R5 = NOT dst_color
         ADD R5, R5, #1          ; R5 = -dst_color
@@ -1573,10 +1604,15 @@ VM_CHK_TAB
         ADD R0, R0, #1          ; R0 = 1 (valid: opposite color, correct rank)
         BRnzp VCT_RET
 
+; Local pointer table for VCT_EMP/VCT_RET (main PVM_ table is out of range)
+VCE_SCRATCH .FILL SCRATCH_CRD   ; local copy: pointer to SCRATCH_CRD
+VCE_MRNK    .FILL MASK_RNK      ; local copy: pointer to rank mask
+VCE_VC_R7   .FILL VC_R7         ; local copy: pointer to VC_R7 save slot
+
 VCT_EMP ; Empty pile: only a King (rank 12) may be placed
-        LD  R5, PVM_SCRATCH     ; R5 = address of SCRATCH_CRD
+        LD  R5, VCE_SCRATCH     ; R5 = address of SCRATCH_CRD
         LDR R4, R5, #0          ; R4 = src card
-        LD  R5, PVM_MRNK        ; R5 = address of rank mask
+        LD  R5, VCE_MRNK        ; R5 = address of rank mask
         LDR R5, R5, #0          ; R5 = x000F
         AND R4, R4, R5          ; R4 = src rank
         ADD R4, R4, #-12        ; R4 = rank - 12 (0 only for King)
@@ -1586,21 +1622,16 @@ VCT_EMP ; Empty pile: only a King (rank 12) may be placed
         BRnzp VCT_RET
 
 VCT_NO  AND R0, R0, #0          ; R0 = 0 (invalid)
-VCT_RET LD  R5, PVM_VC_R7       ; R5 = address of VC_R7 save slot
+VCT_RET LD  R5, VCE_VC_R7       ; R5 = address of VC_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET
 
-; Local pointer for TABADDR (placed just before it for range)
-PVM_TA_R7   .FILL TA_R7         ; pointer to TABADDR R7 save slot
+; Local pointer table for TABADDR (placed just before it for range)
+TAD_TA_R7   .FILL TA_R7         ; local: TABADDR R7 save slot
+TAD_TABDAT  .FILL A_TABDAT      ; local: TAB_DATA base address
 
-; ----------------------------------------------------------------
-;  TABADDR - Compute address of TAB_DATA[pile][row]
-;  Address = A_TABDAT + pile*20 + row
-;  In:  R1 = pile index (0-6), R2 = row index
-;  Out: R0 = absolute address of that card slot
-; ----------------------------------------------------------------
 TABADDR
-        LD  R5, PVM_TA_R7       ; R5 = address of TA_R7 save slot
+        LD  R5, TAD_TA_R7       ; R5 = address of TA_R7 save slot
         STR R7, R5, #0          ; save return address
         ADD R0, R1, R1          ; R0 = pile * 2
         ADD R0, R0, R0          ; R0 = pile * 4
@@ -1610,10 +1641,10 @@ TABADDR
         ADD R3, R3, R3          ; R3 = pile * 4
         ADD R0, R0, R3          ; R0 = pile * 20 (16+4)
         ADD R0, R0, R2          ; R0 = pile*20 + row
-        LD  R3, PVM_TABDAT      ; R3 = address of A_TABDAT pointer
+        LD  R3, TAD_TABDAT      ; R3 = address of A_TABDAT pointer
         LDR R3, R3, #0          ; R3 = base address of TAB_DATA
         ADD R0, R0, R3          ; R0 = absolute address of card slot
-        LD  R5, PVM_TA_R7       ; R5 = address of TA_R7 save slot
+        LD  R5, TAD_TA_R7       ; R5 = address of TA_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET
 
@@ -1670,6 +1701,8 @@ PMV_STOCK   .FILL A_STOCK       ; pointer to STOCK base address
 PMV_WASTE   .FILL A_WASTE       ; pointer to WASTE_TOP address
 PMV_TABSZ   .FILL A_TABSZ       ; pointer to TAB_SZ base address
 PMV_FNDTOP  .FILL A_FNDTOP      ; pointer to FOUND_TOP base address
+PMV_FNDSUT  .FILL A_FNDSUT      ; pointer to FOUND_SUIT base address
+PMV_MSUT    .FILL MASK_SUT      ; pointer to suit mask (for FOUND_SUIT recording)
 PMV_EMPTY   .FILL C_EMPTY       ; pointer to empty sentinel
 PMV_FACEDN  .FILL C_FACEDN      ; pointer to face-down mask
 PMV_TABADDR .FILL TABADDR       ; address of TABADDR helper
@@ -1679,7 +1712,9 @@ PMV_MT_R7   .FILL MT_R7         ; pointer to MOVE_TAB_TAB R7 save
 PMV_FT_R7   .FILL FT_R7         ; pointer to FLIP_TOP R7 save
 PMV_CW_R7   .FILL CW_R7         ; pointer to CHECK_WIN R7 save
 PMV_PW_R7   .FILL PW_R7         ; pointer to PRINT_WIN R7 save
-PMV_FNDTOP2 .FILL A_FNDTOP      ; second pointer to FOUND_TOP (used by CHECK_WIN)
+PMV_FNDTOP2 .FILL A_FNDTOP      ; second pointer to FOUND_TOP (used by CHECK_WIN and waste->found)
+PMV_SCRATCH .FILL SCRATCH_CRD   ; pointer to scratch word (VALID_MOVE card storage)
+PMV_MTTRSV  .FILL MTT_RSAVE     ; pointer to MOVE_TAB_TAB row save slot
 
 ; ----------------------------------------------------------------
 ;  DO_MOVE - Execute the current validated move, update game state
@@ -1705,34 +1740,42 @@ DO_MOVE
         LD  R5, PMV_STOCK       ; R5 = address of A_STOCK pointer
         LDR R4, R5, #0          ; R4 = base of STOCK array
         ADD R4, R4, R3          ; R4 = address of STOCK[STOCK_TOP]
-        LDR R4, R4, #0          ; R4 = top stock card
-        LD  R5, PMV_WASTE       ; R5 = address of A_WASTE pointer
-        LDR R5, R5, #0          ; R5 = address of WASTE_TOP
-        STR R4, R5, #0          ; WASTE_TOP = drawn card
+        LDR R5, R4, #0          ; R5 = top stock card value
+        LD  R6, PMV_WASTE       ; R6 = address of A_WASTE pointer
+        LDR R6, R6, #0          ; R6 = address of WASTE_TOP
+        STR R5, R6, #0          ; WASTE_TOP = drawn card
+        LD  R6, PMV_EMPTY       ; R6 = address of C_EMPTY
+        LDR R6, R6, #0          ; R6 = xFF (empty sentinel)
+        STR R6, R4, #0          ; STOCK[STOCK_TOP] = xFF (clear drawn slot)
         ADD R3, R3, #-1         ; STOCK_TOP--
         STR R3, R2, #0          ; update STOCK_TOP
         BRnzp DMV_DN            ; done
 
-DMV_ND  ; RESET: move waste card back to STOCK[0], STOCK_TOP=0, clear waste
+DMV_ND  ; RESET: put waste card back, restore full stock
         LD  R5, PMV_RST         ; R5 = address of MV_RST
         LDR R2, R5, #0          ; R2 = 5
         NOT R2, R2
         ADD R2, R2, #1
         ADD R2, R1, R2          ; R2 = MTYPE - MV_RST
         BRnp DMV_NR             ; not reset, skip
+        ; Waste card goes back into stock at position 0
         LD  R5, PMV_WASTE       ; R5 = address of A_WASTE pointer
         LDR R2, R5, #0          ; R2 = address of WASTE_TOP
         LDR R3, R2, #0          ; R3 = waste card value
         LD  R5, PMV_STOCK       ; R5 = address of A_STOCK pointer
         LDR R4, R5, #0          ; R4 = base of STOCK array
-        STR R3, R4, #0          ; STOCK[0] = waste card
+        STR R3, R4, #0          ; STOCK[0] = waste card (restores last drawn card)
+        ; Restore STOCK_TOP = 0 (only the waste card goes back; played cards are gone)
         LD  R5, PMV_STKTOP      ; R5 = address of A_STKTOP pointer
         LDR R5, R5, #0          ; R5 = address of STOCK_TOP
         AND R3, R3, #0          ; R3 = 0
         STR R3, R5, #0          ; STOCK_TOP = 0
-        LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
-        LDR R3, R5, #0          ; R3 = xFF
-        STR R3, R2, #0          ; WASTE_TOP = xFF (empty)
+        ; Clear waste
+        LD  R5, PMV_WASTE       ; R5 = address of A_WASTE pointer
+        LDR R5, R5, #0          ; R5 = address of WASTE_TOP
+        LD  R3, PMV_EMPTY       ; R3 = address of C_EMPTY
+        LDR R3, R3, #0          ; R3 = xFF
+        STR R3, R5, #0          ; WASTE_TOP = xFF (empty)
         BRnzp DMV_DN            ; done
 
 DMV_NR  ; TAB->FOUND: remove top of MSRC pile, increment FOUND_TOP[MDST]
@@ -1752,23 +1795,42 @@ DMV_NR  ; TAB->FOUND: remove top of MSRC pile, increment FOUND_TOP[MDST]
         ADD R2, R3, #0          ; R2 = row to pass to TABADDR
         LD  R5, PMV_TABADDR     ; R5 = address of TABADDR
         JSRR R5                 ; R0 = address of top card slot
+        LDR R6, R0, #0          ; R6 = card value (save before clearing)
         LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
         LDR R5, R5, #0          ; R5 = xFF
         STR R5, R0, #0          ; clear the slot (card moved to foundation)
         LD  R5, PMV_TABSZ       ; R5 = address of A_TABSZ pointer
         LDR R5, R5, #0          ; R5 = base of TAB_SZ
         ADD R5, R5, R1          ; R5 = address of TAB_SZ[src]
-        LDR R6, R5, #0          ; R6 = current pile size
-        ADD R6, R6, #-1         ; R6 = new size
-        STR R6, R5, #0          ; TAB_SZ[src]--
+        LDR R0, R5, #0          ; R0 = current pile size
+        ADD R0, R0, #-1         ; R0 = new size
+        STR R0, R5, #0          ; TAB_SZ[src]--
         LD  R5, PMV_MDST        ; R5 = address of MDST
         LDR R5, R5, #0          ; R5 = foundation index
-        LD  R6, PMV_FNDTOP      ; R6 = address of A_FNDTOP pointer
-        LDR R6, R6, #0          ; R6 = base of FOUND_TOP
-        ADD R6, R6, R5          ; R6 = address of FOUND_TOP[foundation]
-        LDR R0, R6, #0          ; R0 = current top rank
+        LD  R4, PMV_FNDTOP      ; R4 = address of A_FNDTOP pointer
+        LDR R4, R4, #0          ; R4 = base of FOUND_TOP
+        ADD R4, R4, R5          ; R4 = address of FOUND_TOP[foundation]
+        LDR R0, R4, #0          ; R0 = current top rank
         ADD R0, R0, #1          ; R0 = new top rank
-        STR R0, R6, #0          ; FOUND_TOP[foundation]++
+        STR R0, R4, #0          ; FOUND_TOP[foundation]++
+        ; If this was an Ace (new rank == 0, i.e. was -1->0), record suit
+        BRnp DMV_TF_NS          ; if new rank != 0, not an Ace, skip suit record
+        ; Extract suit index from card (R6) and store in FOUND_SUIT[MDST]
+        LD  R4, PMV_MSUT        ; R4 = address of suit mask
+        LDR R4, R4, #0          ; R4 = x0030
+        AND R4, R6, R4          ; R4 = suit bits
+        AND R3, R3, #0          ; R3 = suit index counter
+DMV_TSLO ADD R4, R4, #-16
+        BRn DMV_TSLD
+        ADD R3, R3, #1
+        BRnzp DMV_TSLO
+DMV_TSLD LD  R4, PMV_FNDSUT     ; R4 = address of A_FNDSUT pointer
+        LDR R4, R4, #0          ; R4 = base of FOUND_SUIT
+        LD  R0, PMV_MDST
+        LDR R0, R0, #0          ; R0 = foundation index
+        ADD R4, R4, R0          ; R4 = address of FOUND_SUIT[MDST]
+        STR R3, R4, #0          ; FOUND_SUIT[MDST] = suit index
+DMV_TF_NS
         LD  R5, PMV_FLIPTOP     ; R5 = address of FLIP_TOP
         JSRR R5                 ; reveal new top card of src pile if face-down
         BRnzp DMV_DN            ; done
@@ -1815,12 +1877,13 @@ DMV_NTT ; WASTE->TAB: append waste card to MDST pile, clear waste
         STR R5, R4, #0          ; WASTE_TOP = xFF (empty)
         BRnzp DMV_DN            ; done
 
-DMV_NWT ; WASTE->FOUND: increment FOUND_TOP[MDST], clear waste
+DMV_NWT ; WASTE->FOUND: increment FOUND_TOP[MDST], clear waste, record suit if Ace
         LD  R4, PMV_WASTE       ; R4 = address of A_WASTE pointer
         LDR R4, R4, #0          ; R4 = address of WASTE_TOP
-        LD  R6, PMV_EMPTY       ; R6 = address of C_EMPTY
-        LDR R6, R6, #0          ; R6 = xFF
-        STR R6, R4, #0          ; WASTE_TOP = xFF (empty)
+        LDR R6, R4, #0          ; R6 = waste card value (save before clearing)
+        LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
+        LDR R5, R5, #0          ; R5 = xFF
+        STR R5, R4, #0          ; WASTE_TOP = xFF (empty)
         LD  R5, PMV_MDST        ; R5 = address of MDST
         LDR R1, R5, #0          ; R1 = foundation index
         LD  R5, PMV_FNDTOP2     ; R5 = address of A_FNDTOP pointer
@@ -1829,6 +1892,22 @@ DMV_NWT ; WASTE->FOUND: increment FOUND_TOP[MDST], clear waste
         LDR R3, R2, #0          ; R3 = current top rank
         ADD R3, R3, #1          ; R3 = new top rank
         STR R3, R2, #0          ; FOUND_TOP[foundation]++
+        ; If Ace (new rank == 0), record suit in FOUND_SUIT[MDST]
+        ADD R3, R3, #0          ; set CC from new rank
+        BRnp DMV_WF_NS          ; if != 0, not Ace, skip
+        LD  R4, PMV_MSUT        ; R4 = address of suit mask
+        LDR R4, R4, #0          ; R4 = x0030
+        AND R4, R6, R4          ; R4 = suit bits from waste card
+        AND R3, R3, #0          ; R3 = suit index counter
+DMV_WSLO ADD R4, R4, #-16
+        BRn DMV_WSLD
+        ADD R3, R3, #1
+        BRnzp DMV_WSLO
+DMV_WSLD LD  R4, PMV_FNDSUT     ; R4 = address of A_FNDSUT pointer
+        LDR R4, R4, #0          ; R4 = base of FOUND_SUIT
+        ADD R4, R4, R1          ; R4 = address of FOUND_SUIT[MDST]
+        STR R3, R4, #0          ; FOUND_SUIT[MDST] = suit index
+DMV_WF_NS
 
 DMV_DN  LD  R5, PMV_R7          ; R5 = address of DM_R7 save slot
         LDR R7, R5, #0          ; restore return address
@@ -1859,8 +1938,14 @@ MOVE_TAB_TAB
 MTT_LP  ADD R2, R5, #0          ; R2 = current source row
         LD  R6, PMV_MSRC        ; R6 = address of MSRC
         LDR R1, R6, #0          ; R1 = source pile index
+        ; Save R5 (source row) - TABADDR clobbers R5
+        LD  R6, PMV_MTTRSV      ; R6 = address of MTT_RSAVE
+        STR R5, R6, #0          ; save source row
         LD  R6, PMV_TABADDR     ; R6 = address of TABADDR
         JSRR R6                 ; R0 = address of src card
+        ; Restore R5 after JSRR
+        LD  R6, PMV_MTTRSV      ; R6 = address of MTT_RSAVE
+        LDR R5, R6, #0          ; R5 = source row (restored)
         LDR R6, R0, #0          ; R6 = card value to move
         LD  R4, PMV_EMPTY       ; R4 = address of C_EMPTY
         LDR R4, R4, #0          ; R4 = xFF
@@ -1868,19 +1953,34 @@ MTT_LP  ADD R2, R5, #0          ; R2 = current source row
 
         ; Append card to destination pile
         LD  R1, PMV_MDST        ; R1 = address of MDST
+        ; Jump over local data table (can't put data in instruction stream)
+        BRnzp MTT_DST
+MTT_MDST .FILL MDST             ; local: MDST
+MTT_TABSZ .FILL A_TABSZ         ; local: TAB_SZ base address
+MTT_SCRT .FILL MTT_RSAVE        ; local: dedicated row-save slot (NOT SCRATCH_CRD)
+MTT_TABD .FILL TABADDR          ; local: address of TABADDR
+MTT_MSRC .FILL MSRC             ; local: MSRC
+MTT_MCNT .FILL MCNT             ; local: MCNT
+MTT_DST
         LDR R1, R1, #0          ; R1 = destination pile index
-        LD  R4, PMV_TABSZ       ; R4 = address of A_TABSZ pointer
+        LD  R4, MTT_TABSZ       ; R4 = address of A_TABSZ pointer
         LDR R2, R4, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[dst]
         LDR R2, R2, #0          ; R2 = current dst size (= new card's row)
-        LD  R4, PMV_TABADDR     ; R4 = address of TABADDR
+        ; Save R5 before second JSRR
+        LD  R4, MTT_SCRT        ; R4 = address of SCRATCH_CRD
+        STR R5, R4, #0          ; save source row in scratch
+        LD  R4, MTT_TABD        ; R4 = address of TABADDR
         JSRR R4                 ; R0 = address of dst slot
+        ; Restore R5 after second JSRR
+        LD  R4, MTT_SCRT        ; R4 = address of SCRATCH_CRD
+        LDR R5, R4, #0          ; R5 = source row (restored)
         STR R6, R0, #0          ; TAB_DATA[dst][size] = card
 
         ; Increment dst pile size
-        LD  R1, PMV_MDST        ; R1 = address of MDST
+        LD  R1, MTT_MDST        ; R1 = address of MDST
         LDR R1, R1, #0          ; R1 = dst pile index
-        LD  R4, PMV_TABSZ       ; R4 = address of A_TABSZ pointer
+        LD  R4, MTT_TABSZ       ; R4 = address of A_TABSZ pointer
         LDR R2, R4, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[dst]
         LDR R0, R2, #0          ; R0 = current size
@@ -1892,24 +1992,35 @@ MTT_LP  ADD R2, R5, #0          ; R2 = current source row
         BRp MTT_LP              ; if more cards, loop
 
         ; Decrement source pile size by count
-        LD  R5, PMV_MSRC        ; R5 = address of MSRC
+        LD  R5, MTT_MSRC        ; R5 = address of MSRC
         LDR R1, R5, #0          ; R1 = source pile index
-        LD  R5, PMV_TABSZ       ; R5 = address of A_TABSZ pointer
+        LD  R5, MTT_TABSZ       ; R5 = address of A_TABSZ pointer
         LDR R2, R5, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[src]
         LDR R0, R2, #0          ; R0 = current src size
-        LD  R5, PMV_MCNT        ; R5 = address of MCNT
+        LD  R5, MTT_MCNT        ; R5 = address of MCNT
         LDR R3, R5, #0          ; R3 = count
         NOT R3, R3              ; R3 = NOT count
         ADD R3, R3, #1          ; R3 = -count
         ADD R0, R0, R3          ; R0 = src_size - count
         STR R0, R2, #0          ; TAB_SZ[src] -= count
 
-        LD  R5, PMV_FLIPTOP     ; R5 = address of FLIP_TOP
+        BRnzp MTT_FLIP          ; jump over local data words
+MTT_FTP .FILL FLIP_TOP          ; local: address of FLIP_TOP
+MTT_MTR .FILL MT_R7             ; local: MT_R7 save slot
+MTT_FLIP
+        LD  R5, MTT_FTP         ; R5 = address of FLIP_TOP
         JSRR R5                 ; reveal new top of src pile if face-down
-        LD  R5, PMV_MT_R7       ; R5 = address of MT_R7 save slot
+        LD  R5, MTT_MTR         ; R5 = address of MT_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET
+
+; Local pointer table for FLIP_TOP  (PMV_ table is out of +-256 range from here)
+FTP_L_FT_R7  .FILL FT_R7        ; FT_R7 save slot
+FTP_L_MSRC   .FILL MSRC         ; MSRC variable
+FTP_L_TABSZ  .FILL A_TABSZ      ; TAB_SZ base address
+FTP_L_TABAD  .FILL TABADDR      ; address of TABADDR
+FTP_L_FCDN   .FILL C_FACEDN     ; face-down mask x0080
 
 ; ----------------------------------------------------------------
 ;  FLIP_TOP - Reveal the top face-down card of MSRC pile
@@ -1919,70 +2030,66 @@ MTT_LP  ADD R2, R5, #0          ; R2 = current source row
 ;  Out: top card of MSRC pile updated if it was face-down
 ; ----------------------------------------------------------------
 FLIP_TOP
-        LD  R5, PMV_FT_R7       ; R5 = address of FT_R7 save slot
-        STR R7, R5, #0          ; save return address
-        LD  R5, PMV_MSRC        ; R5 = address of MSRC
+        LD  R5, FTP_L_FT_R7     ; save return address
+        STR R7, R5, #0
+        LD  R5, FTP_L_MSRC
         LDR R1, R5, #0          ; R1 = source pile index
-        LD  R5, PMV_TABSZ       ; R5 = address of A_TABSZ pointer
+        LD  R5, FTP_L_TABSZ
         LDR R2, R5, #0          ; R2 = base of TAB_SZ
-        ADD R2, R2, R1          ; R2 = address of TAB_SZ[src]
+        ADD R2, R2, R1          ; R2 = &TAB_SZ[src]
         LDR R3, R2, #0          ; R3 = pile size
-        BRz FTP_DN              ; if pile is empty, nothing to flip
+        BRz FTP_DN              ; empty pile - nothing to flip
         ADD R3, R3, #-1         ; R3 = top row index
-        ADD R2, R3, #0          ; R2 = row argument for TABADDR
-        LD  R5, PMV_TABADDR     ; R5 = address of TABADDR
-        JSRR R5                 ; R0 = address of top card slot
+        ADD R2, R3, #0          ; R2 = row for TABADDR
+        LD  R5, FTP_L_TABAD
+        JSRR R5                 ; R0 = &top card slot
         LDR R3, R0, #0          ; R3 = top card value
-
-        ; Test bit 7: if (card AND x0080) != 0, it's face-down
-        LD  R5, PMV_FACEDN      ; R5 = address of C_FACEDN
-        LDR R4, R5, #0          ; R4 = x0080 (face-down mask)
-        NOT R4, R4              ; R4 = xFF7F (complement)
-        ADD R4, R4, #1          ; R4 = xFF80 = -x0080
-        ADD R4, R3, R4          ; R4 = card - x0080
-        BRnp FTP_DN             ; if nonzero, card is NOT face-down -> skip
-
-        ; Strip face-down bit: card AND xFF7F
-        LD  R5, PMV_FACEDN      ; R5 = address of C_FACEDN
+        LD  R5, FTP_L_FCDN
         LDR R4, R5, #0          ; R4 = x0080
-        NOT R4, R4              ; R4 = xFF7F (all bits except bit 7)
-        AND R3, R3, R4          ; R3 = card with bit 7 cleared = real card
-        STR R3, R0, #0          ; store revealed card back into tableau
-
-FTP_DN  LD  R5, PMV_FT_R7       ; R5 = address of FT_R7 save slot
+        AND R4, R3, R4          ; isolate face-down bit
+        BRz FTP_DN              ; not face-down - skip
+        LD  R5, FTP_L_FCDN
+        LDR R4, R5, #0          ; R4 = x0080
+        NOT R4, R4              ; R4 = xFF7F
+        AND R3, R3, R4          ; strip face-down bit
+        STR R3, R0, #0          ; write revealed card back
+FTP_DN  LD  R5, FTP_L_FT_R7
         LDR R7, R5, #0          ; restore return address
         RET
+
+; Local pointer table for CHECK_WIN  (PMV_ table is out of +-256 range from here)
+CWN_L_CW_R7  .FILL CW_R7        ; CW_R7 save slot
+CWN_L_FNDTP  .FILL A_FNDTOP     ; FOUND_TOP base address
 
 ; ----------------------------------------------------------------
 ;  CHECK_WIN - Check if all four foundations are complete (King on top)
-;  Win condition: FOUND_TOP[0] = FOUND_TOP[1] = FOUND_TOP[2] = FOUND_TOP[3] = 12
+;  Win condition: FOUND_TOP[0..3] all equal 12
 ;  In:  FOUND_TOP array
-;  Out: R0 = 1 if player has won, R0 = 0 otherwise
+;  Out: R0 = 1 if won, R0 = 0 otherwise
 ; ----------------------------------------------------------------
 CHECK_WIN
-        LD  R5, PMV_CW_R7       ; R5 = address of CW_R7 save slot
+        LD  R5, CWN_L_CW_R7
         STR R7, R5, #0          ; save return address
-        AND R2, R2, #0          ; R2 = 0
-        ADD R2, R2, #4          ; R2 = 4 (check 4 foundations)
-        LD  R5, PMV_FNDTOP2     ; R5 = address of A_FNDTOP pointer
-        LDR R1, R5, #0          ; R1 = base address of FOUND_TOP array
-
-CWN_LP  LDR R0, R1, #0          ; R0 = FOUND_TOP[foundation]
-        ADD R0, R0, #-12        ; R0 = top_rank - 12 (0 only if King)
-        BRnp CWN_NO             ; if nonzero, this foundation not complete
-        ADD R1, R1, #1          ; advance to next foundation
-        ADD R2, R2, #-1         ; decrement counter
-        BRp CWN_LP              ; check next foundation
-
-        ; All 4 foundations have King on top -> player wins
-        AND R0, R0, #0          ; R0 = 0
-        ADD R0, R0, #1          ; R0 = 1 (win!)
+        AND R2, R2, #0
+        ADD R2, R2, #4          ; R2 = 4 foundations to check
+        LD  R5, CWN_L_FNDTP
+        LDR R1, R5, #0          ; R1 = base of FOUND_TOP
+CWN_LP  LDR R0, R1, #0          ; R0 = FOUND_TOP[i]
+        ADD R0, R0, #-12        ; 0 only if King
+        BRnp CWN_NO             ; not King - not won
+        ADD R1, R1, #1
+        ADD R2, R2, #-1
+        BRp CWN_LP
+        AND R0, R0, #0
+        ADD R0, R0, #1          ; R0 = 1 (won)
         BRnzp CWN_RET
-
-CWN_NO  AND R0, R0, #0          ; R0 = 0 (not won yet)
-CWN_RET LD  R5, PMV_CW_R7       ; R5 = address of CW_R7 save slot
+CWN_NO  AND R0, R0, #0          ; R0 = 0 (not won)
+CWN_RET LD  R5, CWN_L_CW_R7
         LDR R7, R5, #0          ; restore return address
         RET
+
+; Local pointer table for PRINT_WIN  (PMV_ table is out of +-256 range from here)
+PWN_L_PW_R7  .FILL PW_R7        ; PW_R7 save slot
 
 ; ----------------------------------------------------------------
 ;  PRINT_WIN - Display the victory message
@@ -1990,11 +2097,11 @@ CWN_RET LD  R5, PMV_CW_R7       ; R5 = address of CW_R7 save slot
 ;  Out: congratulations message printed
 ; ----------------------------------------------------------------
 PRINT_WIN
-        LD  R5, PMV_PW_R7       ; R5 = address of PW_R7 save slot
+        LD  R5, PWN_L_PW_R7
         STR R7, R5, #0          ; save return address
-        LEA R0, WIN_STR         ; R0 = address of victory string
-        TRAP x22                ; PUTS: print victory message
-        LD  R5, PMV_PW_R7       ; R5 = address of PW_R7 save slot
+        LEA R0, WIN_STR
+        TRAP x22                ; PUTS victory message
+        LD  R5, PWN_L_PW_R7
         LDR R7, R5, #0          ; restore return address
         RET
 
@@ -2025,4 +2132,5 @@ TAB_SZ      .BLKW 7             ; TAB_SZ[0..6]: card count per pile
 TAB_UP      .BLKW 7             ; reserved
 FOUND       .BLKW 52            ; reserved foundation storage
 FOUND_TOP   .BLKW 4             ; FOUND_TOP[0..3]: top rank per foundation
+FOUND_SUIT  .BLKW 4             ; FOUND_SUIT[0..3]: suit index per foundation (-1=empty)
         .END
