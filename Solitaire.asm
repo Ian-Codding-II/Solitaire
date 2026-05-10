@@ -177,11 +177,12 @@ NEG_x30     .FILL xFFD0         ; -48 = -(ASCII '0'), used to convert digit char
 A_DECK      .FILL x3900         ; base address of DECK array (52 words)
 A_STOCK     .FILL x3934         ; base address of STOCK array (52 words)
 A_STKTOP    .FILL x3968         ; address of STOCK_TOP variable
-A_WASTE     .FILL x3969         ; address of WASTE_TOP variable
-A_TABDAT    .FILL x396A         ; base address of TAB_DATA (7 piles x 20 slots)
-A_TABSZ     .FILL x39F6         ; base address of TAB_SZ array (7 words)
-A_FNDTOP    .FILL x3A38         ; base address of FOUND_TOP array (4 words)
-A_FNDSUT    .FILL FOUND_SUIT     ; base address of FOUND_SUIT array (4 words, -1=empty)
+A_STKMX     .FILL x3969         ; address of STOCK_MAX variable (NEW)
+A_WASTE     .FILL x396A         ; address of WASTE_TOP variable
+A_TABDAT    .FILL x396B         ; base address of TAB_DATA (7 piles x 20 slots)
+A_TABSZ     .FILL x39F7         ; base address of TAB_SZ array (7 words)
+A_FNDTOP    .FILL x3A39         ; base address of FOUND_TOP array (4 words)
+A_FNDSUT    .FILL x3A3D         ; base address of FOUND_SUIT array (4 words, -1=empty)
 
 ; Input buffer and rank character lookup table
 INBUF       .BLKW 20            ; 20-char input buffer for user commands
@@ -556,6 +557,7 @@ PDL_FACEDN  .FILL C_FACEDN      ; pointer to face-down mask (x0080)
 PDL_STOCK   .FILL A_STOCK       ; pointer to STOCK base address
 PDL_NEG24   .FILL NEG_24        ; pointer to -24 constant
 PDL_STKTOP  .FILL A_STKTOP      ; pointer to STOCK_TOP address
+PDL_STKMX   .FILL A_STKMX       ; pointer to STOCK_MAX address (NEW)
 
 ; ----------------------------------------------------------------
 ;  DEAL - Distribute shuffled deck to tableau piles and stock
@@ -684,6 +686,11 @@ DL_STK  LDR R3, R5, #0          ; R3 = next card from deck
         ADD R1, R1, #8          ; R1 = 23 (15+8, can't do 23 in one immediate)
         STR R1, R0, #0          ; STOCK_TOP = 23
 
+        ; Set STOCK_MAX = 23 (saved for RESET to restore full deck)
+        LD  R0, PDL_STKMX       ; R0 = address of A_STKMX pointer
+        LDR R0, R0, #0          ; R0 = address of STOCK_MAX variable
+        STR R1, R0, #0          ; STOCK_MAX = 23
+
         LD  R5, PDL_R7          ; R5 = address of DL_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET                     ; return to MAIN
@@ -699,6 +706,7 @@ PPS_STKTOP  .FILL A_STKTOP      ; pointer to STOCK_TOP address
 PPS_STOCK   .FILL A_STOCK       ; pointer to STOCK base address
 PPS_WASTE   .FILL A_WASTE       ; pointer to WASTE_TOP address
 PPS_FNDTOP  .FILL A_FNDTOP      ; pointer to FOUND_TOP base address
+PPS_FNDSUT  .FILL A_FNDSUT      ; pointer to FOUND_SUIT base address
 PPS_TABSZ   .FILL A_TABSZ       ; pointer to TAB_SZ base address
 PPS_TABDAT  .FILL A_TABDAT      ; pointer to TAB_DATA base address
 PPS_C_NL    .FILL C_NL          ; pointer to newline character
@@ -761,7 +769,12 @@ DPS_FLP LD  R0, PPS_FNDTOP      ; R0 = address of A_FNDTOP pointer
         ADD R0, R0, R3          ; R0 = address of FOUND_TOP[foundation]
         LDR R1, R0, #0          ; R1 = top rank (-1 if empty)
         BRn DPS_FEM             ; if -1, foundation is empty
-        ADD R2, R3, R3          ; R2 = suit * 2
+        ; Look up actual suit from FOUND_SUIT[foundation]
+        LD  R2, PPS_FNDSUT      ; R2 = address of A_FNDSUT pointer
+        LDR R2, R2, #0          ; R2 = base address of FOUND_SUIT
+        ADD R2, R2, R3          ; R2 = address of FOUND_SUIT[foundation]
+        LDR R2, R2, #0          ; R2 = actual suit index (0-3)
+        ADD R2, R2, R2          ; R2 = suit * 2
         ADD R2, R2, R2          ; R2 = suit * 4
         ADD R2, R2, R2          ; R2 = suit * 8
         ADD R2, R2, R2          ; R2 = suit * 16 = suit<<4
@@ -1300,16 +1313,8 @@ VVM_ND  ; Check RESET: valid if stock empty AND waste has a card
         LDR R2, R5, #0          ; R2 = address of STOCK_TOP
         LDR R2, R2, #0          ; R2 = STOCK_TOP
         BRzp VVM_RET            ; if >= 0, stock not empty -> can't reset (R0=0)
-        LD  R5, PVM_WASTE       ; R5 = address of A_WASTE pointer
-        LDR R2, R5, #0          ; R2 = address of WASTE_TOP
-        LDR R2, R2, #0          ; R2 = waste card value
-        LD  R5, PVM_EMPTY       ; R5 = address of C_EMPTY
-        LDR R3, R5, #0          ; R3 = xFF (empty sentinel)
-        NOT R3, R3              ; R3 = NOT xFF
-        ADD R3, R3, #1          ; R3 = -xFF
-        ADD R3, R2, R3          ; R3 = waste - xFF
-        BRz VVM_RET             ; if zero, waste is empty -> invalid (R0=0)
-        ADD R0, R0, #1          ; R0 = 1 (valid: stock empty, waste has card)
+        ; Stock is empty (STOCK_TOP < 0): reset is valid regardless of waste state
+        ADD R0, R0, #1          ; R0 = 1 (valid)
         BRnzp VVM_RET           ; done
 
 VVM_NR  ; Check TAB->FOUND: top of src pile must fit on foundation
@@ -1697,6 +1702,7 @@ PMV_TFND    .FILL MV_TFND       ; pointer to tab->found type
 PMV_TTAB    .FILL MV_TTAB       ; pointer to tab->tab type
 PMV_WTAB    .FILL MV_WTAB       ; pointer to waste->tab type
 PMV_STKTOP  .FILL A_STKTOP      ; pointer to STOCK_TOP address
+PMV_STKMX   .FILL A_STKMX       ; pointer to STOCK_MAX address
 PMV_STOCK   .FILL A_STOCK       ; pointer to STOCK base address
 PMV_WASTE   .FILL A_WASTE       ; pointer to WASTE_TOP address
 PMV_TABSZ   .FILL A_TABSZ       ; pointer to TAB_SZ base address
@@ -1744,33 +1750,42 @@ DO_MOVE
         LD  R6, PMV_WASTE       ; R6 = address of A_WASTE pointer
         LDR R6, R6, #0          ; R6 = address of WASTE_TOP
         STR R5, R6, #0          ; WASTE_TOP = drawn card
-        LD  R6, PMV_EMPTY       ; R6 = address of C_EMPTY
-        LDR R6, R6, #0          ; R6 = xFF (empty sentinel)
-        STR R6, R4, #0          ; STOCK[STOCK_TOP] = xFF (clear drawn slot)
+        ; NOTE: stock slot NOT cleared so RESET can restore the full deck
         ADD R3, R3, #-1         ; STOCK_TOP--
         STR R3, R2, #0          ; update STOCK_TOP
         BRnzp DMV_DN            ; done
 
-DMV_ND  ; RESET: put waste card back, restore full stock
+DMV_ND  ; RESET: scan STOCK for highest non-empty slot, restore STOCK_TOP
         LD  R5, PMV_RST         ; R5 = address of MV_RST
         LDR R2, R5, #0          ; R2 = 5
         NOT R2, R2
         ADD R2, R2, #1
         ADD R2, R1, R2          ; R2 = MTYPE - MV_RST
         BRnp DMV_NR             ; not reset, skip
-        ; Waste card goes back into stock at position 0
-        LD  R5, PMV_WASTE       ; R5 = address of A_WASTE pointer
-        LDR R2, R5, #0          ; R2 = address of WASTE_TOP
-        LDR R3, R2, #0          ; R3 = waste card value
+        ; Scan STOCK[23..0] for highest non-xFF slot
+        LD  R5, PMV_STKMX       ; R5 = address of A_STKMX pointer
+        LDR R2, R5, #0          ; R2 = address of STOCK_MAX
+        LDR R3, R2, #0          ; R3 = STOCK_MAX = 23 (scan start)
         LD  R5, PMV_STOCK       ; R5 = address of A_STOCK pointer
         LDR R4, R5, #0          ; R4 = base of STOCK array
-        STR R3, R4, #0          ; STOCK[0] = waste card (restores last drawn card)
-        ; Restore STOCK_TOP = 0 (only the waste card goes back; played cards are gone)
+        LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
+        LDR R5, R5, #0          ; R5 = xFF
+DMV_RSC ADD R2, R4, R3          ; R2 = address of STOCK[R3]
+        LDR R6, R2, #0          ; R6 = STOCK[R3]
+        NOT R6, R6              ; R6 = NOT STOCK[R3]
+        ADD R6, R6, #1          ; R6 = -STOCK[R3]
+        ADD R6, R5, R6          ; R6 = xFF - STOCK[R3]; 0 if empty
+        BRnp DMV_RSF            ; if nonzero, slot is not empty -> found it
+        ADD R3, R3, #-1         ; decrement index
+        BRzp DMV_RSC            ; keep scanning (stop at -1 = all empty)
+        ; All slots are xFF: nothing to restore, leave STOCK_TOP = -1
+        BRnzp DMV_RSD
+DMV_RSF ; Found non-empty slot at index R3: set STOCK_TOP = R3
         LD  R5, PMV_STKTOP      ; R5 = address of A_STKTOP pointer
         LDR R5, R5, #0          ; R5 = address of STOCK_TOP
-        AND R3, R3, #0          ; R3 = 0
-        STR R3, R5, #0          ; STOCK_TOP = 0
-        ; Clear waste
+        STR R3, R5, #0          ; STOCK_TOP = R3
+        BRnzp DMV_RSD
+DMV_RSD ; Clear waste
         LD  R5, PMV_WASTE       ; R5 = address of A_WASTE pointer
         LDR R5, R5, #0          ; R5 = address of WASTE_TOP
         LD  R3, PMV_EMPTY       ; R3 = address of C_EMPTY
@@ -1846,7 +1861,7 @@ DMV_NTF ; TAB->TAB: move MCNT cards from MSRC to MDST
         JSRR R5                 ; execute the card transfer
         BRnzp DMV_DN            ; done
 
-DMV_NTT ; WASTE->TAB: append waste card to MDST pile, clear waste
+DMV_NTT ; WASTE->TAB: append waste card to MDST pile, clear waste, clear STOCK slot
         LD  R5, PMV_WTAB        ; R5 = address of MV_WTAB
         LDR R2, R5, #0          ; R2 = 3
         NOT R2, R2
@@ -1875,12 +1890,37 @@ DMV_NTT ; WASTE->TAB: append waste card to MDST pile, clear waste
         LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
         LDR R5, R5, #0          ; R5 = xFF
         STR R5, R4, #0          ; WASTE_TOP = xFF (empty)
+        ; Clear the STOCK slot that held this card (STOCK_TOP+1 was last drawn)
+        LD  R5, PMV_STKTOP      ; R5 = address of A_STKTOP pointer
+        LDR R5, R5, #0          ; R5 = address of STOCK_TOP
+        LDR R6, R5, #0          ; R6 = current STOCK_TOP
+        ADD R6, R6, #1          ; R6 = index of slot that was just played
+        LD  R5, PMV_STOCK       ; R5 = address of A_STOCK pointer
+        LDR R5, R5, #0          ; R5 = base of STOCK
+        ADD R5, R5, R6          ; R5 = address of STOCK[STOCK_TOP+1]
+        LD  R6, PMV_EMPTY       ; R6 = address of C_EMPTY
+        LDR R6, R6, #0          ; R6 = xFF
+        STR R6, R5, #0          ; STOCK[STOCK_TOP+1] = xFF (card is now gone)
         BRnzp DMV_DN            ; done
 
 DMV_NWT ; WASTE->FOUND: increment FOUND_TOP[MDST], clear waste, record suit if Ace
         LD  R4, PMV_WASTE       ; R4 = address of A_WASTE pointer
         LDR R4, R4, #0          ; R4 = address of WASTE_TOP
         LDR R6, R4, #0          ; R6 = waste card value (save before clearing)
+        LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
+        LDR R5, R5, #0          ; R5 = xFF
+        STR R5, R4, #0          ; WASTE_TOP = xFF (empty)
+        ; Clear the STOCK slot that held this card (STOCK_TOP+1 was last drawn)
+        LD  R4, PMV_STKTOP      ; R4 = address of A_STKTOP pointer
+        LDR R4, R4, #0          ; R4 = address of STOCK_TOP
+        LDR R5, R4, #0          ; R5 = current STOCK_TOP
+        ADD R5, R5, #1          ; R5 = index of slot that was just played
+        LD  R4, PMV_STOCK       ; R4 = address of A_STOCK pointer
+        LDR R4, R4, #0          ; R4 = base of STOCK
+        ADD R4, R4, R5          ; R4 = address of STOCK[STOCK_TOP+1]
+        LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
+        LDR R5, R5, #0          ; R5 = xFF
+        STR R5, R4, #0          ; STOCK[STOCK_TOP+1] = xFF (card is now gone)
         LD  R5, PMV_EMPTY       ; R5 = address of C_EMPTY
         LDR R5, R5, #0          ; R5 = xFF
         STR R5, R4, #0          ; WASTE_TOP = xFF (empty)
@@ -1915,8 +1955,8 @@ DMV_DN  LD  R5, PMV_R7          ; R5 = address of DM_R7 save slot
 
 ; ----------------------------------------------------------------
 ;  MOVE_TAB_TAB - Move MCNT cards from MSRC tableau to MDST tableau
-;  Cards are moved one at a time from the start row downward.
-;  After moving, calls FLIP_TOP to reveal any newly-exposed face-down card.
+;  FIX: save/restore R3 (count) across TABADDR calls via MTT_CNTS.
+;  Local data table placed at top so the loop has no mid-body branches.
 ;  In:  MSRC, MDST, MCNT set
 ;  Out: TAB_DATA and TAB_SZ updated
 ; ----------------------------------------------------------------
@@ -1935,70 +1975,81 @@ MOVE_TAB_TAB
         ADD R5, R5, #1          ; R5 = -count
         ADD R5, R4, R5          ; R5 = size - count = first row to move
 
+        BRnzp MTT_SKIPD         ; jump over local data table
+MTT_MDST  .FILL MDST            ; local: MDST
+MTT_TABSZ .FILL A_TABSZ         ; local: TAB_SZ base address
+MTT_RSAV2 .BLKW 1               ; local: save slot for R5 (source row)
+MTT_CNTS  .BLKW 1               ; local: NEW save slot for R3 (card count)
+MTT_TABD  .FILL TABADDR         ; local: address of TABADDR
+MTT_MSRC2 .FILL MSRC            ; local: MSRC
+MTT_MCNT2 .FILL MCNT            ; local: MCNT
+MTT_SKIPD
+
 MTT_LP  ADD R2, R5, #0          ; R2 = current source row
-        LD  R6, PMV_MSRC        ; R6 = address of MSRC
-        LDR R1, R6, #0          ; R1 = source pile index
-        ; Save R5 (source row) - TABADDR clobbers R5
-        LD  R6, PMV_MTTRSV      ; R6 = address of MTT_RSAVE
-        STR R5, R6, #0          ; save source row
-        LD  R6, PMV_TABADDR     ; R6 = address of TABADDR
-        JSRR R6                 ; R0 = address of src card
-        ; Restore R5 after JSRR
-        LD  R6, PMV_MTTRSV      ; R6 = address of MTT_RSAVE
-        LDR R5, R6, #0          ; R5 = source row (restored)
+        LD  R1, MTT_MSRC2
+        LDR R1, R1, #0          ; R1 = source pile
+
+        ; Save R5 and R3 before first JSRR (TABADDR clobbers R3)
+        LD  R6, PMV_MTTRSV
+        STR R5, R6, #0          ; save source row to MTT_RSAVE
+        ST  R3, MTT_CNTS        ; save card count directly into MTT_CNTS
+
+        LD  R6, MTT_TABD
+        JSRR R6                 ; R0 = &TAB_DATA[src][row]
+
+        ; Restore R5 and R3
+        LD  R6, PMV_MTTRSV
+        LDR R5, R6, #0          ; source row (restored)
+        LD  R3, MTT_CNTS        ; card count (restored directly from MTT_CNTS)
+
         LDR R6, R0, #0          ; R6 = card value to move
-        LD  R4, PMV_EMPTY       ; R4 = address of C_EMPTY
+        LD  R4, PMV_EMPTY
         LDR R4, R4, #0          ; R4 = xFF
         STR R4, R0, #0          ; clear source slot
 
-        ; Append card to destination pile
-        LD  R1, PMV_MDST        ; R1 = address of MDST
-        ; Jump over local data table (can't put data in instruction stream)
-        BRnzp MTT_DST
-MTT_MDST .FILL MDST             ; local: MDST
-MTT_TABSZ .FILL A_TABSZ         ; local: TAB_SZ base address
-MTT_SCRT .FILL MTT_RSAVE        ; local: dedicated row-save slot (NOT SCRATCH_CRD)
-MTT_TABD .FILL TABADDR          ; local: address of TABADDR
-MTT_MSRC .FILL MSRC             ; local: MSRC
-MTT_MCNT .FILL MCNT             ; local: MCNT
-MTT_DST
-        LDR R1, R1, #0          ; R1 = destination pile index
-        LD  R4, MTT_TABSZ       ; R4 = address of A_TABSZ pointer
+        ; Get dst pile and compute destination slot address
+        LD  R1, MTT_MDST
+        LDR R1, R1, #0          ; R1 = dst pile index
+        LD  R4, MTT_TABSZ
         LDR R2, R4, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[dst]
         LDR R2, R2, #0          ; R2 = current dst size (= new card's row)
-        ; Save R5 before second JSRR
-        LD  R4, MTT_SCRT        ; R4 = address of SCRATCH_CRD
-        STR R5, R4, #0          ; save source row in scratch
-        LD  R4, MTT_TABD        ; R4 = address of TABADDR
-        JSRR R4                 ; R0 = address of dst slot
-        ; Restore R5 after second JSRR
-        LD  R4, MTT_SCRT        ; R4 = address of SCRATCH_CRD
-        LDR R5, R4, #0          ; R5 = source row (restored)
+
+        ; Save R5 and R3 before second JSRR (TABADDR clobbers R3)
+        ST  R5, MTT_RSAV2       ; save source row directly into MTT_RSAV2
+        ST  R3, MTT_CNTS        ; save card count directly into MTT_CNTS
+
+        LD  R4, MTT_TABD
+        JSRR R4                 ; R0 = &TAB_DATA[dst][size]
+
+        ; Restore R5 and R3
+        LD  R5, MTT_RSAV2       ; source row (restored directly from MTT_RSAV2)
+        LD  R3, MTT_CNTS        ; card count (restored directly from MTT_CNTS)
+
         STR R6, R0, #0          ; TAB_DATA[dst][size] = card
 
         ; Increment dst pile size
-        LD  R1, MTT_MDST        ; R1 = address of MDST
+        LD  R1, MTT_MDST
         LDR R1, R1, #0          ; R1 = dst pile index
-        LD  R4, MTT_TABSZ       ; R4 = address of A_TABSZ pointer
+        LD  R4, MTT_TABSZ
         LDR R2, R4, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[dst]
         LDR R0, R2, #0          ; R0 = current size
         ADD R0, R0, #1          ; R0 = new size
         STR R0, R2, #0          ; TAB_SZ[dst]++
 
-        ADD R5, R5, #1          ; advance source row
-        ADD R3, R3, #-1         ; decrement card counter
-        BRp MTT_LP              ; if more cards, loop
+        ADD R5, R5, #1          ; next source row
+        ADD R3, R3, #-1         ; count-- (R3 is valid now after restore)
+        BRp MTT_LP              ; if more cards to move, loop
 
-        ; Decrement source pile size by count
-        LD  R5, MTT_MSRC        ; R5 = address of MSRC
+        ; Decrement source pile size by original count
+        LD  R5, MTT_MSRC2
         LDR R1, R5, #0          ; R1 = source pile index
-        LD  R5, MTT_TABSZ       ; R5 = address of A_TABSZ pointer
+        LD  R5, MTT_TABSZ
         LDR R2, R5, #0          ; R2 = base of TAB_SZ
         ADD R2, R2, R1          ; R2 = address of TAB_SZ[src]
         LDR R0, R2, #0          ; R0 = current src size
-        LD  R5, MTT_MCNT        ; R5 = address of MCNT
+        LD  R5, MTT_MCNT2
         LDR R3, R5, #0          ; R3 = count
         NOT R3, R3              ; R3 = NOT count
         ADD R3, R3, #1          ; R3 = -count
