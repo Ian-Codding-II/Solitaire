@@ -137,32 +137,19 @@ C_PIPE      .FILL x7C           ; pipe '|' for box drawing
 C_STAR      .FILL x2A           ; asterisk '*' for face-down cards
 C_LBR       .FILL x5B           ; left bracket '['
 C_RBR       .FILL x5D           ; right bracket ']'
+C_BS        .FILL x08           ; backspace character (BS)
+C_DEL       .FILL x7F           ; delete/rubout character (DEL)
 
 ; UTF-8 encoded suit symbols (3 bytes each, sent via PUTS as null-terminated strings)
 ; Using .FILL for each byte since LC-3 .STRINGZ only handles ASCII
-UTF_B1      .FILL xE2           ; first byte of all suit symbols (E2)
-UTF_B2      .FILL x99           ; second byte of all suit symbols (99)
-SUT_C3      .FILL xA3           ; third byte for Clubs    (♣ = E2 99 A3)
-SUT_D3      .FILL xA6           ; third byte for Diamonds (♦ = E2 99 A6)
-SUT_H3      .FILL xA5           ; third byte for Hearts   (♥ = E2 99 A5)
-SUT_S3      .FILL xA0           ; third byte for Spades   (♠ = E2 99 A0)
-; Pre-built null-terminated suit strings for TRAP x22 (PUTS)
-STR_CLB .FILL xE2   ; ♣ byte 1
-        .FILL x99   ; ♣ byte 2
-        .FILL xA3   ; ♣ byte 3
-        .FILL x00   ; null terminator
-STR_DIA .FILL xE2   ; ♦ byte 1
-        .FILL x99   ; ♦ byte 2
-        .FILL xA6   ; ♦ byte 3
-        .FILL x00   ; null terminator
-STR_HRT .FILL xE2   ; ♥ byte 1
-        .FILL x99   ; ♥ byte 2
-        .FILL xA5   ; ♥ byte 3
-        .FILL x00   ; null terminator
-STR_SPA .FILL xE2   ; ♠ byte 1
-        .FILL x99   ; ♠ byte 2
-        .FILL xA0   ; ♠ byte 3
-        .FILL x00   ; null terminator
+; Suit symbol byte sequences for TRAP x21 (OUT) - one byte per word
+; Each suit is 3 UTF-8 bytes: E2 99 Xn
+UTF_B1      .FILL xE2           ; first byte shared by all suits
+UTF_B2      .FILL x99           ; second byte shared by all suits
+SUT_C3      .FILL xA3           ; ♣ Clubs    third byte
+SUT_D3      .FILL xA6           ; ♦ Diamonds third byte
+SUT_H3      .FILL xA5           ; ♥ Hearts   third byte
+SUT_S3      .FILL xA0           ; ♠ Spades   third byte
 
 ; Numeric constants that exceed the 5-bit immediate range (-16 to +15)
 NEG_52      .FILL #-52          ; negative 52 (deck size)
@@ -913,10 +900,12 @@ PPC_MRNK    .FILL MASK_RNK      ; pointer to rank mask (x000F)
 PPC_MSUT    .FILL MASK_SUT      ; pointer to suit mask (x0030)
 PPC_RANKCH  .FILL RANK_CH       ; address of rank character table
 PPC_NEG32   .FILL NEG_32        ; pointer to -32 (for Hearts suit detection)
-PPC_SCLB    .FILL STR_CLB       ; address of pre-built Clubs string (♣)
-PPC_SDIA    .FILL STR_DIA       ; address of pre-built Diamonds string (♦)
-PPC_SHRT    .FILL STR_HRT       ; address of pre-built Hearts string (♥)
-PPC_SSPA    .FILL STR_SPA       ; address of pre-built Spades string (♠)
+PPC_UB1     .FILL UTF_B1        ; pointer to UTF-8 byte 1 (xE2, shared by all suits)
+PPC_UB2     .FILL UTF_B2        ; pointer to UTF-8 byte 2 (x99, shared by all suits)
+PPC_SC3     .FILL SUT_C3        ; pointer to Clubs    byte 3 (xA3)
+PPC_SD3     .FILL SUT_D3        ; pointer to Diamonds byte 3 (xA6)
+PPC_SH3     .FILL SUT_H3        ; pointer to Hearts   byte 3 (xA5)
+PPC_SS3     .FILL SUT_S3        ; pointer to Spades   byte 3 (xA0)
 
 ; ----------------------------------------------------------------
 ;  PRINT_CARD - Print one card as [RS] where R=rank S=suit symbol
@@ -954,10 +943,10 @@ PRINT_CARD
         LDR R0, R3, #0          ; R0 = rank character ('A','2'..'9','T','J','Q','K')
         TRAP x21                ; OUT: print rank character
 
-        ; Print suit symbol using UTF-8 bytes via EBYTE
+        ; Print suit: dispatch on suit bits, emit 3 UTF-8 bytes via TRAP x21
         LD  R2, PPC_MSUT        ; R2 = address of suit mask
         LDR R2, R2, #0          ; R2 = x0030
-        AND R2, R1, R2          ; R2 = suit bits (0=Clubs, 16=Diamonds, 32=Hearts, 48=Spades)
+        AND R2, R1, R2          ; R2 = suit bits (0=Clubs,16=Diamonds,32=Hearts,48=Spades)
         BRz DPC_CLB             ; if 0, Clubs
         ADD R3, R2, #-16        ; R3 = suit_bits - 16
         BRz DPC_DIA             ; if 0, Diamonds
@@ -967,21 +956,49 @@ PRINT_CARD
         BRz DPC_HRT             ; if 0, Hearts
         BRnzp DPC_SPA           ; otherwise Spades
 
-DPC_CLB LD  R0, PPC_SCLB        ; ♣ Clubs: load address of pre-built string
-        TRAP x22                ; PUTS: emit E2 99 A3 (♣) atomically
-        BRnzp DPC_END           ; done with suit
+DPC_CLB LD  R0, PPC_UB1         ; ♣ Clubs: byte 1
+        LDR R0, R0, #0          ; R0 = xE2
+        TRAP x21                ; OUT byte 1
+        LD  R0, PPC_UB2         ; byte 2
+        LDR R0, R0, #0          ; R0 = x99
+        TRAP x21                ; OUT byte 2
+        LD  R0, PPC_SC3         ; byte 3
+        LDR R0, R0, #0          ; R0 = xA3
+        TRAP x21                ; OUT byte 3 -> ♣
+        BRnzp DPC_END
 
-DPC_DIA LD  R0, PPC_SDIA        ; ♦ Diamonds: load address of pre-built string
-        TRAP x22                ; PUTS: emit E2 99 A6 (♦) atomically
-        BRnzp DPC_END           ; done with suit
+DPC_DIA LD  R0, PPC_UB1         ; ♦ Diamonds: byte 1
+        LDR R0, R0, #0          ; R0 = xE2
+        TRAP x21                ; OUT byte 1
+        LD  R0, PPC_UB2         ; byte 2
+        LDR R0, R0, #0          ; R0 = x99
+        TRAP x21                ; OUT byte 2
+        LD  R0, PPC_SD3         ; byte 3
+        LDR R0, R0, #0          ; R0 = xA6
+        TRAP x21                ; OUT byte 3 -> ♦
+        BRnzp DPC_END
 
-DPC_HRT LD  R0, PPC_SHRT        ; ♥ Hearts: load address of pre-built string
-        TRAP x22                ; PUTS: emit E2 99 A5 (♥) atomically
-        BRnzp DPC_END           ; done with suit
+DPC_HRT LD  R0, PPC_UB1         ; ♥ Hearts: byte 1
+        LDR R0, R0, #0          ; R0 = xE2
+        TRAP x21                ; OUT byte 1
+        LD  R0, PPC_UB2         ; byte 2
+        LDR R0, R0, #0          ; R0 = x99
+        TRAP x21                ; OUT byte 2
+        LD  R0, PPC_SH3         ; byte 3
+        LDR R0, R0, #0          ; R0 = xA5
+        TRAP x21                ; OUT byte 3 -> ♥
+        BRnzp DPC_END
 
-DPC_SPA LD  R0, PPC_SSPA        ; ♠ Spades: load address of pre-built string
-        TRAP x22                ; PUTS: emit E2 99 A0 (♠) atomically
-        BRnzp DPC_END           ; done with suit
+DPC_SPA LD  R0, PPC_UB1         ; ♠ Spades: byte 1
+        LDR R0, R0, #0          ; R0 = xE2
+        TRAP x21                ; OUT byte 1
+        LD  R0, PPC_UB2         ; byte 2
+        LDR R0, R0, #0          ; R0 = x99
+        TRAP x21                ; OUT byte 2
+        LD  R0, PPC_SS3         ; byte 3
+        LDR R0, R0, #0          ; R0 = xA0
+        TRAP x21                ; OUT byte 3 -> ♠
+        BRnzp DPC_END
 
 DPC_EMP LD  R0, PPC_SPACE       ; empty card: print two spaces
         LDR R0, R0, #0          ; R0 = space char
@@ -1023,6 +1040,9 @@ EBYTE
 PGI_R7      .FILL GI_R7         ; pointer to GET_INPUT R7 save slot
 PGI_C_NL    .FILL C_NL          ; pointer to newline character
 PGI_INBUF   .FILL INBUF         ; pointer to input buffer address
+PGI_C_BS    .FILL C_BS          ; pointer to backspace char (x08)
+PGI_C_DEL   .FILL C_DEL         ; pointer to delete/rubout char (x7F)
+PGI_C_SPC   .FILL C_SPACE       ; pointer to space char (x20)
 
 ; ----------------------------------------------------------------
 ;  GET_INPUT - Read one line from keyboard into INBUF
@@ -1039,19 +1059,61 @@ GET_INPUT
         LDR R1, R1, #0          ; R1 = base address of INBUF (write pointer)
 
 GI_LP   TRAP x20                ; GETC: read one character -> R0
-        TRAP x21                ; OUT: echo character back to console
+
+        ; Check for newline (Enter)
         LD  R2, PGI_C_NL        ; R2 = address of newline constant
         LDR R2, R2, #0          ; R2 = newline char (x0A)
-        NOT R2, R2              ; R2 = NOT newline
+        NOT R2, R2
         ADD R2, R2, #1          ; R2 = -newline
         ADD R2, R0, R2          ; R2 = char - newline
-        BRz GI_DN               ; if zero, user pressed Enter
+        BRz GI_DN               ; if zero, Enter pressed -> done
+
+        ; Check for backspace (x08)
+        LD  R2, PGI_C_BS        ; R2 = address of C_BS
+        LDR R2, R2, #0          ; R2 = x08
+        NOT R2, R2
+        ADD R2, R2, #1          ; R2 = -x08
+        ADD R2, R0, R2          ; R2 = char - x08
+        BRz GI_BS               ; if zero, backspace pressed
+
+        ; Check for delete/rubout (x7F)
+        LD  R2, PGI_C_DEL       ; R2 = address of C_DEL
+        LDR R2, R2, #0          ; R2 = x7F
+        NOT R2, R2
+        ADD R2, R2, #1          ; R2 = -x7F
+        ADD R2, R0, R2          ; R2 = char - x7F
+        BRz GI_BS               ; if zero, treat delete same as backspace
+
+        ; Normal character: echo and store
+        TRAP x21                ; OUT: echo character back to console
         STR R0, R1, #0          ; INBUF[pos] = char
         ADD R1, R1, #1          ; advance write pointer
         BRnzp GI_LP             ; read next character
 
+GI_BS   ; Backspace: only erase if buffer is not empty
+        LD  R2, PGI_INBUF       ; R2 = address of INBUF pointer
+        LDR R2, R2, #0          ; R2 = base address of INBUF
+        NOT R2, R2
+        ADD R2, R2, #1          ; R2 = -INBUF_base
+        ADD R2, R1, R2          ; R2 = write_ptr - INBUF_base (= chars typed so far)
+        BRz GI_LP               ; if zero, buffer empty, nothing to erase
+        ADD R1, R1, #-1         ; move write pointer back one
+        LD  R2, PGI_C_BS        ; R2 = address of C_BS
+        LDR R0, R2, #0          ; R0 = x08 (backspace)
+        TRAP x21                ; OUT: move cursor left
+        LD  R0, PGI_C_SPC       ; R0 = address of C_SPACE
+        LDR R0, R0, #0          ; R0 = x20 (space character)
+        TRAP x21                ; OUT: overwrite erased char with space
+        LD  R2, PGI_C_BS        ; R2 = address of C_BS
+        LDR R0, R2, #0          ; R0 = x08 (backspace again)
+        TRAP x21                ; OUT: move cursor back to erased position
+        BRnzp GI_LP             ; continue reading
+
 GI_DN   AND R0, R0, #0          ; R0 = 0 (null terminator)
         STR R0, R1, #0          ; INBUF[pos] = '\0' (null-terminate string)
+        LD  R0, PGI_C_NL        ; R0 = address of newline constant
+        LDR R0, R0, #0          ; R0 = newline char (x0A)
+        TRAP x21                ; OUT: print newline after echoed command
         LD  R5, PGI_R7          ; R5 = address of GI_R7 save slot
         LDR R7, R5, #0          ; restore return address
         RET                     ; return to MAIN
